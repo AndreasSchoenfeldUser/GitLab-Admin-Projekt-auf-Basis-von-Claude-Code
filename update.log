@@ -1,0 +1,404 @@
+GitLab-Upgrade gitlab-public-demo-server (16.11.10 -> neueste 19.x)
+=====================================================================
+
+2026-11-08  Schritt 1 (16.11.10 -> 17.3.x): Vorprüfung, ABGEBROCHEN
+---------------------------------------------------------------------
+
+[Zugang]
+- Host-Alias gitlab-demo fehlte, lokal in ~/.ssh/config ergänzt
+  (HostName gitlab-pub.comquent.academy, 95.217.158.233, Schlüssel ~/.ssh/id_ed25519).
+  Sicherung der alten Datei: ~/.ssh/config.bak-<Zeitstempel>
+- Öffentlicher Schlüssel vom Benutzer in /root/.ssh/authorized_keys eingetragen.
+
+[Ist-Zustand, ca. 09:28 Serverzeit]
+- Hostname gitlab-public-demo-server, Ubuntu jammy
+- Installiert: gitlab-ce 16.11.10-ce.0 (bestätigt über VERSION und dpkg)
+- Hardware: 3 vCPU, 3,7 GB RAM, kein Swap
+- Speicher: 3,5 GB belegt, 23 MB verfügbar, kswapd0 aktiv
+- Load Average: 37 / 36 / 35
+- SSH-Anmeldung stark verzögert, einmal Timeout beim Banner-Austausch
+- Uptime 1107 Tage
+- OOM-Kills von GitLab-Prozessen:
+    2026-11-07 23:39  bundle  (ca. 870 MB RSS)
+    2026-11-08 02:53  ruby    (ca. 940 MB RSS), ausgelöst durch gitaly
+- Sidekiq: 13 von 20 Threads beschäftigt
+- unattended-upgrade läuft seit 06:44 (Entfernen alter Kernelpakete), dpkg-Log endet
+  um 06:45 mit "startup packages configure". Hält vermutlich die dpkg-Sperre.
+  Erlaubte Quellen nur Ubuntu-Repositories, gitlab-ce nicht betroffen.
+- apt-mark showhold und gitlab-ctl status liefen wegen Überlast in Timeouts.
+
+[Nicht durchgeführt]
+- gitlab-ctl status, df -h, PostgreSQL-Version, Background-Migrations-Prüfung.
+  gitlab-rails runner lädt die Rails-Umgebung (ca. 1 GB) und hätte weitere
+  OOM-Kills auslösen können.
+
+[Bewertung]
+Zu wenig Arbeitsspeicher schon für den laufenden Betrieb. Backup, Paketinstallation,
+Migrationen und pg-upgrade brauchen zusätzlich Speicher. Ein OOM-Kill während
+dpkg/reconfigure kann eine halb konfigurierte Installation hinterlassen.
+Upgrade nicht begonnen, keine Änderungen am Server.
+
+[Offen / Entscheidung Betreiber]
+1. Server bei Hetzner auf mind. 8 GB RAM vergrößern (empfohlen, Neustart nötig)
+2. Swap-Datei anlegen (4-8 GB)
+3. GitLab-Speicherbedarf über gitlab.rb senken (nur mit Freigabe)
+
+2026-11-08  Server vergrößert, Vorprüfung Schritt 1 wiederholt (09:34 UTC)
+---------------------------------------------------------------------
+
+[Ressourcen nach Hetzner-Resize und Neustart]
+- 4 vCPU, 7,6 GB RAM (4,5 GB verfügbar), kein Swap, Load 0,9
+- Plattenplatz /, /var/opt/gitlab, /var/opt/gitlab/backups: 75 GB, 56 GB frei (gleiches Dateisystem)
+
+[Vorprüfung]
+- Version: 16.11.10 bestätigt
+- dpkg --audit: sauber (unterbrochenes unattended-upgrade hat nichts halb installiert)
+- apt-mark showhold: kein Paket gehalten
+- PostgreSQL 14.11 (Voraussetzung >= 14 für GitLab 17 erfüllt)
+  Altes Datenverzeichnis aus früherem pg-upgrade vorhanden: /var/opt/gitlab/postgresql/data.13 (nicht anfassen)
+- Background Migrations: remaining 0, queued 0, failed 0
+- gitlab-ctl status: alle Dienste run:, AUSSER alertmanager (Crash-Loop)
+
+[alertmanager, schon vor dem Upgrade defekt]
+- Fehler: "unable to initialize gossip mesh ... No private IP address found, and explicit IP not provided"
+- Rund 4,9 Mio. Neustarts in den Logs seit mindestens 2026-09-07, heute 115 seit dem Neustart.
+- In /etc/gitlab/gitlab.rb ist alertmanager nicht konfiguriert (Standardwerte).
+- Behebung braucht eine Änderung an gitlab.rb, die die Upgrade Notes nicht vorschreiben -> Freigabe nötig.
+
+[Upgrade-Pfad gegen https://docs.gitlab.com/update/upgrade_paths/ geprüft: stimmt mit CLAUDE.md überein]
+Konkrete Versionen laut apt-cache madison (jammy):
+  17.3.7 -> 17.5.5 -> 17.8.7 -> 17.11.7 -> 18.2.8 -> 18.5.7 -> 18.8.11 -> 18.11.14 -> 19.2.10 -> 19.5.3
+  19.5.3 ist die neueste verfügbare Version und selbst ein Pflichtstopp.
+
+[alertmanager-Fix, freigegeben vom Betreiber]
+- Kopie: /root/gitlab-config-backup/gitlab.rb.16.11.10-vor-alertmanager-fix-20261108095730
+- Ergänzt in /etc/gitlab/gitlab.rb:
+    alertmanager['flags'] = { 'cluster.advertise-address' => '127.0.0.1:9094' }
+- gitlab-ctl reconfigure: EXIT=0 (Log /root/reconfigure-alertmanager-fix.log)
+- alertmanager läuft stabil ("gossip settled; proceeding")
+
+2026-11-08  Schritt 1: 16.11.10 -> 17.3.7  ERFOLGREICH
+---------------------------------------------------------------------
+Start Installation 10:00:22 UTC, Ende 10:05:47 UTC (ca. 5,5 min), Migrationen fertig 10:15 UTC
+
+[Upgrade Notes 17.0-17.3, geprüft]
+- PostgreSQL >= 14: erfüllt (14.11)
+- grafana[]-Block in gitlab.rb: nicht vorhanden
+- ci_pipeline_messages: 0 Zeilen -> optionaler Stopp 17.1.8 nicht nötig
+- Aktive Personal/Project/Group Access Tokens ohne Ablaufdatum: 0
+- Runner: 1 registriert. Ab 17.0 ist die Registrierung per Registrierungstoken standardmäßig aus
+  (allow_runner_registration_token war true). Bestehender Runner läuft weiter, neue Runner
+  sollten über den Authentifizierungstoken-Workflow angelegt werden.
+- Doppelte Gitaly-Storage-Pfade: keine gitaly[]-Einträge in gitlab.rb
+- Datenbestand: 54 Benutzer, 41 Projekte, Repos 5,9 MB, DB 154 MB
+
+[Backup]
+- gitlab-backup create: 1794131996_2026_11_08_16.11.10_gitlab_backup.tar (EXIT=0)
+- Automatisches Pre-Install-Backup: 1794132078_2026_11_08_16.11.10_gitlab_backup.tar
+- Config: /root/gitlab-config-backup/gitlab.rb.16.11.10-20261108095938
+          /root/gitlab-config-backup/gitlab-secrets.json.16.11.10-20261108095938
+
+[Installation]
+- apt-get install gitlab-ce=17.3.7-ce.0: EXIT=0 (Log /root/upgrade-17.3.7-ce.0.log)
+- apt-mark hold gitlab-ce gesetzt
+- Im Log nur übliche Chef-Warnungen ("... does not have a log_group or default logdir mode defined",
+  Cinc Client EOL). needrestart empfiehlt Neustart von gitlab-runsvdir.service (nicht nötig, Dienste neu gestartet).
+
+[Nachprüfung]
+- VERSION: 17.3.7
+- gitlab-ctl status: alle 17 Dienste run:
+- /-/readiness: 200 (direkt nach Install kurz 502, bis Puma gestartet war); extern /users/sign_in: 200
+- gitlab:check SANITIZE=true: keine Fehler (Log /root/gitlab-check-17.3.7.log)
+- Batched Migrations: 6 nach dem Upgrade, um 10:15 alle abgeschlossen, 0 failed
+
+2026-11-08  Schritt 2: 17.3.7 -> 17.5.5  ERFOLGREICH
+---------------------------------------------------------------------
+Start 10:17:40 UTC (Backup), Installation bis 10:23 UTC (ca. 5 min), Migrationen fertig bis 10:31 UTC
+
+[Upgrade Notes 17.4-17.11, geprüft]
+- 17.4/17.5: nichts zutreffend (kein S3-Object-Storage, keine angepasste Gitaly-Auth,
+  external_url in Kleinbuchstaben -> Web-IDE-OAuth-Problem nicht relevant)
+- 17.7 OpenSSL 3: kein LDAP, kein eigenes SMTP, 0 Webhooks, Zertifikat über Let's Encrypt -> unkritisch
+- 17.8 KAS-Startproblem: nach Schritt 3 prüfen (gitlab-kas läuft)
+- 17.8 Runner-Tags: Ziel 17.8.7 ist der korrigierte Patch-Release
+- Aktive gitlab.rb-Schlüssel: external_url, gitlab_rails['initial_root_password'], letsencrypt[...], alertmanager['flags']
+
+[Backup]
+- gitlab-backup create: 1794133082_2026_11_08_17.3.7 (OK)
+- Pre-Install-Backup: 1794133156_2026_11_08_17.3.7
+- Config: /root/gitlab-config-backup/*.17.3.7-20261108101740
+
+[Installation]
+- apt-get install gitlab-ce=17.5.5-ce.0: EXIT=0 (Log /root/upgrade-17.5.5-ce.0.log), hold gesetzt
+- Warnungen: nur Chef-Hinweise "only_if block ... returned a string" (registry.key, pages/kas secret), harmlos
+
+[Nachprüfung]
+- VERSION 17.5.5, alle 17 Dienste run:, readiness 200
+- gitlab:check: keine Fehler (Log /root/gitlab-check-17.5.5.log)
+- Batched Migrations: alle abgeschlossen, 0 failed
+
+2026-11-08  Schritt 3: 17.5.5 -> 17.8.7  ERFOLGREICH
+---------------------------------------------------------------------
+Start 10:31:59 UTC (Backup), Installation bis 10:38 UTC (ca. 6 min), Migrationen fertig bis 11:04 UTC
+
+[Backup]
+- gitlab-backup create: 1794133942_2026_11_08_17.5.5 (OK), Pre-Install-Backup: 1794134021_2026_11_08_17.5.5
+- Config: /root/gitlab-config-backup/*.17.5.5-20261108103159
+
+[Installation]
+- apt-get install gitlab-ce=17.8.7-ce.0: EXIT=0 (Log /root/upgrade-17.8.7-ce.0.log), hold gesetzt
+- Warnung: "git_data_dirs has been deprecated since 17.8 and will be removed in 18.0"
+  Ursache: Die Prüfung in deprecations.rb schlägt an, sobald der Schlüssel in der gespeicherten
+  Node-Konfiguration existiert (hier leerer Wert {}). In gitlab.rb ist git_data_dirs nur auskommentiert,
+  Gitaly nutzt den Standard-Storage "default" -> /var/opt/gitlab/git-data/repositories.
+  Laut https://docs.gitlab.com/omnibus/settings/configuration/ ist nur bei explizit gesetztem
+  git_data_dirs eine Migration nötig -> keine Aktion.
+
+[Nachprüfung]
+- VERSION 17.8.7, alle 17 Dienste run: (inkl. gitlab-kas, KAS-Problem aus 17.8-Notes tritt nicht auf)
+- readiness 200, extern 200, gitlab:check ohne Fehler (Log /root/gitlab-check-17.8.7.log)
+- Batched Migrations: alle abgeschlossen (ca. 26 min), 0 failed
+
+2026-11-08  Schritt 4: 17.8.7 -> 17.11.7  ERFOLGREICH (inkl. automatischem PostgreSQL 14 -> 16)
+---------------------------------------------------------------------
+Start 11:05:39 UTC (Backup), Installation bis 11:13 UTC (ca. 8 min), Migrationen fertig bis 11:37 UTC
+
+[Backup]
+- gitlab-backup create: 1794135962_2026_11_08_17.8.7 (OK), Pre-Install-Backup: 1794136041_2026_11_08_17.8.7
+- Config: /root/gitlab-config-backup/*.17.8.7-20261108110539
+
+[Installation]
+- apt-get install gitlab-ce=17.11.7-ce.0: EXIT=0 (Log /root/upgrade-17.11.7-ce.0.log), hold gesetzt
+- Das Paket hat PostgreSQL automatisch von 14.11 auf 16.8 aktualisiert
+  ("Upgrading PostgreSQL to 16.8" ... "Database upgrade is complete, running vacuumdb analyze").
+  Backup lag vorher vor (s. o.). Ein manuelles gitlab-ctl pg-upgrade -V 16 war damit nicht mehr nötig.
+- Altes Datenverzeichnis: /var/opt/gitlab/postgresql/data.14 (NICHT gelöscht, wie vorgegeben)
+  Weiterhin vorhanden: /var/opt/gitlab/postgresql/data.13, /var/opt/gitlab/postgresql-version.old
+- Warnung: laufende Redis-Version weicht von installierter ab -> nach Abschluss der Migrationen
+  gitlab-ctl restart redis ausgeführt: Redis 7.0.15 -> 7.2.7, readiness 200
+
+[PostgreSQL nach Upgrade]
+- server_version 16.8, PG_VERSION 16
+- Erweiterungen nicht aktualisiert: pg_trgm 1.5 (verfügbar 1.6), btree_gist 1.5 (verfügbar 1.7).
+  pg_upgrade hat dafür /var/opt/gitlab/postgresql/update_extensions.sql erzeugt (lag schon seit 13->14 unausgeführt).
+  Für den Betrieb unkritisch, Empfehlung für den Abschluss.
+
+[Nachprüfung]
+- VERSION 17.11.7, alle 17 Dienste run:, readiness 200, extern 200
+- gitlab:check ohne Fehler (Log /root/gitlab-check-17.11.7.log)
+- Batched Migrations: alle abgeschlossen (ca. 24 min), 0 failed
+
+[Upgrade Notes 18.0-18.11, geprüft vor Schritt 5]
+- git_data_dirs entfällt in 18.0: nicht explizit gesetzt -> keine Aktion
+- PostgreSQL >= 16.5 für 18.0: erfüllt (16.8)
+- 18.2: direkt auf 18.2.6+ (Ziel 18.2.8)
+- 18.5.0/18.5.1 NGINX-404 für andere Hostnamen: Ziel 18.5.7 ist korrigiert, /-/health danach testen
+- 18.8.2+: Deploy Keys/PATs gesperrter Benutzer werden ungültig -> vor Schritt 7 prüfen
+- 18.11: automatisches PostgreSQL-Upgrade auf 17.7 bei Single-Node -> Backup davor zwingend
+- 18.11.0/18.11.1 CI_JOB_TOKEN-Regression: Ziel 18.11.14 ist korrigiert
+- 18.11: per Job kompilierte CI-Konfiguration auf 1 MiB begrenzt
+- Mattermost und Spamcheck fallen in 19.0 weg (hier nicht genutzt)
+
+2026-11-08  Schritt 5: 17.11.7 -> 18.2.8  ERFOLGREICH (Major-Sprung auf 18)
+---------------------------------------------------------------------
+Start 11:39:07 UTC (Backup), Installation bis 11:45 UTC (ca. 6 min), Migrationen fertig bis 11:58 UTC
+
+[Backup]
+- gitlab-backup create: 1794137969_2026_11_08_17.11.7 (OK), Pre-Install-Backup: 1794138043_2026_11_08_17.11.7
+- Config: /root/gitlab-config-backup/*.17.11.7-20261108113907
+
+[Installation]
+- apt-get install gitlab-ce=18.2.8-ce.0: EXIT=0 (Log /root/upgrade-18.2.8-ce.0.log), hold gesetzt
+- Einzige Warnung: Redis-Neustart nötig -> gitlab-ctl restart redis (7.2.7 -> 7.2.9), readiness 200
+
+[Nachprüfung]
+- VERSION 18.2.8, alle 17 Dienste run:, readiness 200, extern 200
+- gitlab:check ohne Fehler (Log /root/gitlab-check-18.2.8.log)
+- Batched Migrations: alle abgeschlossen (ca. 13 min), 0 failed
+
+2026-11-08  Schritt 6: 18.2.8 -> 18.5.7  ERFOLGREICH
+---------------------------------------------------------------------
+Start 11:59:44 UTC (Backup), Installation bis 12:06:52 UTC (ca. 7 min), Migrationen fertig bis 12:21 UTC
+
+[Backup]
+- gitlab-backup create: 1794139206_2026_11_08_18.2.8 (OK), Pre-Install-Backup: 1794139282_2026_11_08_18.2.8
+- Config: /root/gitlab-config-backup/*.18.2.8-20261108115944
+
+[Installation]
+- apt-get install gitlab-ce=18.5.7-ce.0: EXIT=0 (Log /root/upgrade-18.5.7-ce.0.log), hold gesetzt
+- Redis-Neustart laut Installer: 7.2.9 -> 7.2.11
+
+[Nachprüfung]
+- VERSION 18.5.7, alle 17 Dienste run:, readiness 200, extern 200
+- /-/health lokal 200 (NGINX-Problem aus 18.5.0/18.5.1 tritt nicht auf). Extern 404 ist
+  Standardverhalten (Health-Checks nur aus Monitoring-Whitelist, Standard localhost).
+- gitlab:check ohne Fehler (Log /root/gitlab-check-18.5.7.log)
+- Batched Migrations: alle abgeschlossen (ca. 14 min), 0 failed
+
+[Vorbereitung Schritt 7, 18.8.2+ ungültige Credentials gesperrter Benutzer]
+- Deploy Keys gesamt: 0; aktive PATs gesperrter Benutzer: 0 -> nicht betroffen
+
+2026-11-08  Benutzerbereinigung auf Anweisung des Betreibers (12:22 UTC)
+---------------------------------------------------------------------
+- Gelöscht: 48 Konten im Status blocked_pending_approval (nie freigegeben).
+  Vorher geprüft: alle nie angemeldet, keine eigenen Projekte, keine Mitgliedschaften,
+  keine Issues, Merge Requests oder Kommentare. Überwiegend Spam-Registrierungen
+  (u. a. support, billing, helpdesk, hr, Serien kb*, git*, sv*), angelegt 2024-06 bis 2026-11.
+- Verfahren: Users::DestroyService (hard_delete: false) über gitlab-rails runner, mit Abbruch bei
+  Abweichung von 48 Kandidaten; danach Löschung durch Sidekiq (MigrateRecordsToGhostUserInBatchesWorker),
+  fertig um 12:24 UTC.
+- Wiederherstellbar nur über Backup 1794139206_2026_11_08_18.2.8 (oder älter).
+- Verbleibende Konten (7): root (Admin), demo, robert (Admin), alert-bot, support-bot, ghost, GitLabDuo
+
+[Hinweis Prüfverfahren ab 18.5]
+- Gitlab::BackgroundMigration.remaining existiert in 18.5.7 nicht mehr (undefined method).
+  Die Vorprüfung für Schritt 7 hat deshalb zunächst abgebrochen, es wurde nichts gestartet.
+- Laut https://docs.gitlab.com/update/background_migrations/ werden nur noch Batched Migrations geprüft
+  (gitlab-rake gitlab:background_migrations:status bis 18.8, :list ab 18.9, oder psql auf
+  batched_background_migrations mit status NOT IN (3,6)). Prüfung entsprechend angepasst.
+
+2026-11-08  Schritt 7: 18.5.7 -> 18.8.11  ERFOLGREICH
+---------------------------------------------------------------------
+Start 12:26:44 UTC (Backup), Installation bis 12:33:44 UTC (ca. 7 min), Migrationen fertig bis 12:58 UTC
+
+[Backup]
+- gitlab-backup create: 1794140827_2026_11_08_18.5.7 (OK), Pre-Install-Backup: 1794140903_2026_11_08_18.5.7
+- Config: /root/gitlab-config-backup/*.18.5.7-20261108122644
+
+[Installation]
+- apt-get install gitlab-ce=18.8.11-ce.0: EXIT=0 (Log /root/upgrade-18.8.11-ce.0.log), hold gesetzt
+- Keine Warnungen, kein Redis-Neustart nötig
+
+[Nachprüfung]
+- VERSION 18.8.11, alle 17 Dienste run:, readiness 200, extern 200
+- gitlab:check ohne Fehler (Log /root/gitlab-check-18.8.11.log)
+- Batched Migrations: alle abgeschlossen (ca. 25 min), 0 failed
+
+[Upgrade Notes 19.0-19.5, geprüft vor Schritt 8/9]
+- 19.0: PostgreSQL 17 Pflicht -> wird durch 18.11 automatisch erledigt, nach Schritt 8 prüfen
+- 19.0: Mattermost entfernt -> keine mattermost[...]-Schlüssel in gitlab.rb
+- 19.0: Redis 6 entfernt -> gebündeltes Redis 7.2 nicht betroffen
+- 19.0: Registry-Metadaten-DB Standard "prefer" (Fehler nur 19.0.0/19.0.1), kein S3 -> unkritisch
+- 19.0: Webhook-Zeitstempel ISO 8601 -> keine Webhooks vorhanden
+- Ubuntu 22.04 weiterhin unterstützt (nur 20.04 entfernt)
+- 19.5: KAS-Adresse für neue Agents standardmäßig grpcs:// (nur relevant bei Proxy ohne HTTP/2)
+
+2026-11-08  Schritt 8: 18.8.11 -> 18.11.14  ERFOLGREICH (inkl. automatischem PostgreSQL 16 -> 17)
+---------------------------------------------------------------------
+Start 12:59:34 UTC (Backup), Installation bis 13:07:52 UTC (ca. 8 min), Migrationen fertig bis 13:25 UTC
+
+[Backup]
+- gitlab-backup create: 1794142796_2026_11_08_18.8.11 (OK), Pre-Install-Backup: 1794142875_2026_11_08_18.8.11
+- Config: /root/gitlab-config-backup/*.18.8.11-20261108125934
+
+[Installation]
+- apt-get install gitlab-ce=18.11.14-ce.0: EXIT=0 (Log /root/upgrade-18.11.14-ce.0.log), hold gesetzt
+- Automatisches PostgreSQL-Upgrade auf 17.10 ("Upgrading PostgreSQL to 17.10" ... "Upgrade has completed",
+  vacuumdb analyze ausgeführt). Backup lag vorher vor.
+- Altes Datenverzeichnis: /var/opt/gitlab/postgresql/data.16 (NICHT gelöscht)
+- update_extensions.sql jetzt: amcheck, pg_trgm, btree_gist (nicht ausgeführt, s. Empfehlungen)
+- Keine Installer-Warnungen
+
+[Nachprüfung]
+- VERSION 18.11.14, PostgreSQL 17.10, alle 17 Dienste run:, readiness 200, extern 200
+- gitlab:check ohne Fehler (Log /root/gitlab-check-18.11.14.log)
+- Batched Migrations: alle abgeschlossen (ca. 17 min), 0 failed
+- Plattenplatz: 44 GB frei
+
+2026-11-08  Schritt 9: 18.11.14 -> 19.2.10  ERFOLGREICH (Major-Sprung auf 19)
+---------------------------------------------------------------------
+Start 13:26:14 UTC (Backup), Installation bis 13:32:56 UTC (ca. 7 min), Migrationen fertig bis 13:45 UTC
+
+[Backup]
+- gitlab-backup create: 1794144396_2026_11_08_18.11.14 (OK), Pre-Install-Backup: 1794144458_2026_11_08_18.11.14
+- Config: /root/gitlab-config-backup/*.18.11.14-20261108132614
+
+[Installation]
+- Vorab bestätigt: keine mattermost[...]-Schlüssel in gitlab.rb
+- apt-get install gitlab-ce=19.2.10-ce.0: EXIT=0 (Log /root/upgrade-19.2.10-ce.0.log), hold gesetzt
+- Redis-Neustart laut Installer: 7.2.11 -> 7.2.16
+
+[Nachprüfung]
+- VERSION 19.2.10, alle 17 Dienste run:, readiness 200, extern 200
+- gitlab:check ohne Fehler (Log /root/gitlab-check-19.2.10.log)
+- Batched Migrations: alle abgeschlossen (ca. 12 min), 0 failed
+- apt-get update 13:46: neueste verfügbare Version weiterhin 19.5.3
+
+2026-11-08  Schritt 10: 19.2.10 -> 19.5.3  ERFOLGREICH
+---------------------------------------------------------------------
+Start 13:46:47 UTC (Backup), Installation bis 13:53:28 UTC (ca. 7 min), Migrationen fertig bis 14:09 UTC
+
+[Backup]
+- gitlab-backup create: 1794145631_2026_11_08_19.2.10 (OK), Pre-Install-Backup: 1794145705_2026_11_08_19.2.10
+- Config: /root/gitlab-config-backup/*.19.2.10-20261108134647
+
+[Installation]
+- apt-get install gitlab-ce=19.5.3-ce.0: EXIT=0 (Log /root/upgrade-19.5.3-ce.0.log), hold gesetzt
+- Keine Installer-Warnungen
+
+[Nachprüfung]
+- VERSION 19.5.3, alle 17 Dienste run:, readiness 200, extern 200
+- gitlab:check ohne Fehler (Log /root/gitlab-check-19.5.3.log)
+- Batched Migrations: alle abgeschlossen (ca. 16 min), 0 failed
+
+
+=====================================================================
+ABSCHLUSS  2026-11-08 14:10 UTC
+=====================================================================
+
+[Ergebnis]
+- GitLab CE 16.11.10 -> 19.5.3 in 10 Schritten, alle Pflichtstopps eingehalten:
+  17.3.7, 17.5.5, 17.8.7, 17.11.7, 18.2.8, 18.5.7, 18.8.11, 18.11.14, 19.2.10, 19.5.3
+- Dauer: 10:00 bis 14:09 UTC (ca. 4 h, davon der Großteil Background Migrations)
+- 19.5.3 ist die neueste verfügbare Version (apt-cache madison, Stand 13:46 UTC)
+- Paket gitlab-ce steht auf hold
+
+[Endzustand]
+- PostgreSQL 17.11 (Weg: 14.11 -> 16.8 automatisch mit 17.11.7 -> 17.10 automatisch mit 18.11.14
+  -> 17.11 mit 19.x-Paket)
+- Redis 7.2.16
+- Hardware nach Hetzner-Resize: 4 vCPU, 7,6 GB RAM (unter Last 2,5 GB verfügbar), kein Swap
+- Plattenplatz: 75 GB, 31 GB belegt, 41 GB frei
+- Alle 17 Dienste run:, Weboberfläche intern und extern erreichbar
+
+[gitlab:check 19.5.3]
+- 59 Prüfungen "yes/ok", keine Fehler, kein "Try fixing"
+- Übersprungen (normal): "Tables are truncated?", Systemd unit files/init script (Omnibus nutzt keine)
+
+[Änderungen außerhalb der reinen Paket-Upgrades]
+- /etc/gitlab/gitlab.rb: alertmanager['flags'] = { 'cluster.advertise-address' => '127.0.0.1:9094' }
+  (Crash-Loop seit mind. 2026-09-07 behoben, Freigabe durch Betreiber)
+- 48 nie freigegebene Spam-Konten gelöscht (Anweisung Betreiber), 7 Konten verbleiben
+- Lokal: Host-Alias gitlab-demo in ~/.ssh/config, öffentlicher Schlüssel in /root/.ssh/authorized_keys
+
+[Offene Warnungen]
+- Keine aus gitlab:check.
+- Der einzige registrierte Runner (ID 2, Projekt-Runner) hat keinen Runner-Manager-Eintrag, also nie
+  Kontakt zum Server gehabt bzw. keine Version gemeldet.
+
+[Empfehlungen, manuell zu erledigen]
+1. Runner: Runner ID 2 prüfen. Wird er gebraucht, gitlab-runner auf 19.x aktualisieren und über den
+   Authentifizierungstoken-Workflow neu registrieren (Registrierungstoken sind seit 17.0 standardmäßig aus).
+   Sonst löschen.
+2. Selbstregistrierung: signup_enabled ist an, nur die Admin-Freigabe hält Spam-Konten auf. Auf einem
+   öffentlichen Demo-Server Registrierung abschalten (Admin > Settings > General > Sign-up restrictions)
+   oder auf erlaubte E-Mail-Domains beschränken.
+3. gitlab.rb enthält gitlab_rails['initial_root_password'] im Klartext. Wird nur bei der Erstinstallation
+   gelesen -> Zeile entfernen (Kopie vorher), danach gitlab-ctl reconfigure. Ebenso alte Kopien in
+   /root/gitlab-config-backup/ und /etc/gitlab/config_backup prüfen.
+4. PostgreSQL-Erweiterungen: /var/opt/gitlab/postgresql/update_extensions.sql (amcheck, pg_trgm, btree_gist)
+   nach einem Backup ausführen: gitlab-psql -f /var/opt/gitlab/postgresql/update_extensions.sql
+5. Alte PostgreSQL-Datenverzeichnisse nach Prüfung löschen (zusammen ca. 900 MB):
+   /var/opt/gitlab/postgresql/data.13 (308 MB), data.14 (258 MB), data.16 (337 MB),
+   sowie /var/opt/gitlab/postgresql-version.old und delete_old_cluster.sh
+6. Backups: 24 Backup-Archive (90 MB) in /var/opt/gitlab/backups, alle auf derselben Platte wie GitLab.
+   Ein aktuelles Backup plus gitlab.rb und gitlab-secrets.json auf ein externes Ziel kopieren,
+   ältere Archive aufräumen und gitlab_rails['backup_keep_time'] setzen.
+   21 Konfigurationskopien in /root/gitlab-config-backup/ (enthalten Secrets) auf wenige reduzieren.
+7. Arbeitsspeicher: 7,6 GB entsprechen der GitLab-Untergrenze für sparsame Setups (Vorgabe 16 GB).
+   Speicherverbrauch beobachten, ggf. Swap als Sicherheitsnetz oder Puma/Sidekiq reduzieren.
+8. Künftige Upgrades: Pflichtstopps 19.8 und 19.11. Vorher apt-mark unhold gitlab-ce.
+9. Das Pflichtkommando Gitlab::BackgroundMigration.remaining aus CLAUDE.md existiert ab 18.5 nicht mehr.
+   Ersatz: gitlab-rake gitlab:background_migrations:list (ab 18.9) bzw. :wait (ab 19.5).
+10. Server lief vor dem Resize 1107 Tage ohne Neustart. Neustarts nach Kernel-Updates einplanen
+    (unattended-upgrades ist aktiv, gitlab-ce ist durch hold geschützt).
